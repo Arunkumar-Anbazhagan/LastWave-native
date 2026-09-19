@@ -33,6 +33,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.lastwave.app.R
 import com.lastwave.app.playback.SignalPathReport
+import com.lastwave.app.ui.theme.LiquidGlassPreset
+import com.lastwave.app.ui.theme.LocalLiquidGlass
+import com.lastwave.app.ui.theme.LocalLiquidGlassOverlayBackdrop
+import com.lastwave.app.ui.theme.liquidGlassChrome
+import com.lastwave.app.ui.theme.liquidGlassContainerColor
 import java.util.Locale
 
 /**
@@ -48,11 +53,22 @@ fun SignalPathDialog(
     onDismiss: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
+        val glass = LocalLiquidGlass.current
         Surface(
             shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            color = liquidGlassContainerColor(
+                MaterialTheme.colorScheme.surfaceContainerHigh,
+                enabled = glass,
+                backdrop = LocalLiquidGlassOverlayBackdrop.current,
+            ),
             contentColor = MaterialTheme.colorScheme.onSurface,
-            tonalElevation = 6.dp,
+            tonalElevation = if (glass) 0.dp else 6.dp,
+            modifier = Modifier.liquidGlassChrome(
+                RoundedCornerShape(24.dp),
+                glass,
+                LiquidGlassPreset.ModalSheet,
+                LocalLiquidGlassOverlayBackdrop.current,
+            ),
         ) {
             Column(
                 modifier = Modifier

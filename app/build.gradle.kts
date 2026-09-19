@@ -213,7 +213,10 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
-    implementation(libs.kyant.backdrop)
+    // Apple-style liquid glass (AGSL refraction + merging). Replaces Kyant backdrop.
+    // Shapes is the lightweight squircle geometry Liquify refracts through (no RenderEffect).
+    implementation(libs.liquify)
+    implementation(libs.kyant.shapes)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)

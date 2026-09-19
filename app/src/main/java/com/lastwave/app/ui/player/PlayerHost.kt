@@ -224,8 +224,8 @@ import com.lastwave.app.ui.theme.LocalLiquidGlassBackdrop
 import com.lastwave.app.ui.theme.LocalLiquidGlassOverlayBackdrop
 import com.lastwave.app.ui.theme.LiquidGlassPreset
 import com.lastwave.app.ui.theme.BackdropBlur
-import com.kyant.backdrop.Backdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.hakim.liquify.Backdrop
+import com.hakim.liquify.backdrops.rememberLayerBackdrop
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlin.math.abs
@@ -1575,8 +1575,17 @@ private fun FullPlayer(
             val bgMaxDimension = maxOf(bgWidth, bgHeight, 1f)
 
             Box(Modifier.matchParentSize().liquidGlassSource(playerBackdrop)) {
-            // Apple Music: Full-bleed scaled & deeply blurred artwork
-            BackdropBlur(radius = 36.dp, modifier = Modifier.fillMaxSize()) {
+            // Apple Music: Full-bleed scaled & deeply blurred artwork.
+            // Dark veil in BOTH light and dark mode: the full player sits on
+            // a dark scrim (see header comment below), so lyrics/controls use
+            // the white overlay palette. A surface veil turns light mode into
+            // near-white wash (white-on-white lyrics + dead cover tint).
+            BackdropBlur(
+                radius = 36.dp,
+                modifier = Modifier.fillMaxSize(),
+                veil = Color.Black,
+                veilAlpha = 0.52f,
+            ) {
                 PlayerArtwork(
                     track = track,
                     modifier = Modifier
@@ -1584,7 +1593,7 @@ private fun FullPlayer(
                         .graphicsLayer {
                             scaleX = 1.35f
                             scaleY = 1.35f
-                            alpha = 0.72f
+                            alpha = 0.9f
                         },
                     corner = 0.dp,
                     decodeSizePx = 200,
