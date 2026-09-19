@@ -76,7 +76,8 @@ class ModuleRunner @Inject constructor(
             "${providerTarget(handle)}.resolvePlayback($target).then(r=>JSON.stringify(r));",
             "resolve.js",
         )
-        Log.d(TAG, "resolvePlayback result len: ${res.length}")
+        // TEMP-DIAG: log result head to identify the fixed 32-char miss (revert after diagnosis).
+        Log.d(TAG, "resolvePlayback result len: ${res.length} head: ${res.take(200)}")
         res
     }
 
