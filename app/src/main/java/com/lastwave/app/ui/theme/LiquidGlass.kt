@@ -279,18 +279,19 @@ fun Modifier.liquidGlassChrome(
     val interactive = preset == LiquidGlassPreset.FloatingControls ||
         preset == LiquidGlassPreset.PlayerControls
     val tint = fallbackTintOnly(shape)
-    return runCatching {
-        this.liquify(
-            shape = shape,
-            material = material,
-            backdrop = backdrop,
-            highlight = Highlight.Default,
-            shadow = Shadow.Default,
-            dragging = false,
-            stretching = false,
-            interactiveHighlight = interactive,
-        ).then(tint)
-    }.getOrDefault(this.then(fallback))
+    // NOTE: liquify() is @Composable and the compiler forbids composable
+    // invocations inside runCatching/try-catch. Device risk is already gated
+    // above (null backdrop, isDeviceGlassCapable); call it directly.
+    return this.liquify(
+        shape = shape,
+        material = material,
+        backdrop = backdrop,
+        highlight = Highlight.Default,
+        shadow = Shadow.Default,
+        dragging = false,
+        stretching = false,
+        interactiveHighlight = interactive,
+    ).then(tint)
 }
 
 /**
@@ -444,19 +445,19 @@ fun LiquidGlassIconButton(
             saturation = 1.2f,
         )
     }
+    // NOTE: liquify() is @Composable — it cannot sit inside runCatching.
+    // Capability is pre-gated (backdrop != null && capable); call directly.
     val gelModifier = if (backdrop != null && capable) {
-        runCatching {
-            Modifier.liquify(
-                shape = shape,
-                material = gelMaterial,
-                backdrop = backdrop,
-                highlight = Highlight.Default,
-                shadow = Shadow.Default,
-                dragging = true,
-                stretching = false,
-                interactiveHighlight = true,
-            )
-        }.getOrDefault(Modifier.canvasLiquidGlassChrome(shape, LocalIsDarkTheme.current))
+        Modifier.liquify(
+            shape = shape,
+            material = gelMaterial,
+            backdrop = backdrop,
+            highlight = Highlight.Default,
+            shadow = Shadow.Default,
+            dragging = true,
+            stretching = false,
+            interactiveHighlight = true,
+        )
     } else {
         Modifier.canvasLiquidGlassChrome(shape, LocalIsDarkTheme.current)
     }
