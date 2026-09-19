@@ -3163,6 +3163,9 @@ internal fun formatTime(ms: Long): String {
 }
 
 private fun qualityLabel(state: MusicPlayerState): String = when {
+    // Dolby Atmos (Tidal spatial) → badge, never kbps/resolution.
+    state.audioCodec?.equals("DOLBY ATMOS", ignoreCase = true) == true ||
+        state.audioCodec?.equals("ATMOS", ignoreCase = true) == true -> "DOLBY ATMOS"
     // Lossless with known bit depth / sampling rate → resolution, never kbps.
     state.isLossless && state.bitDepth != null && state.samplingRateKHz != null -> {
         val rounded = (state.samplingRateKHz * 10).roundToInt() / 10.0

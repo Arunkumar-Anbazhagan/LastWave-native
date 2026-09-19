@@ -525,7 +525,12 @@ class TrackDownloadManager @Inject constructor(
                 var expectedContentLength: Long? = null
                 var useParallelDownload = false
 
-                val downloadQuality = misc.downloadQuality
+                // Dolby ON → request the Atmos mix (28); the Tidal DASH leg
+                // below already saves it as .m4a. Otherwise honor the
+                // download-quality setting (stereo tiers / YouTube).
+                val downloadQuality =
+                    if (misc.dolbyAtmosEnabled) LosslessMusicApi.QUALITY_DOLBY_ATMOS
+                    else misc.downloadQuality
                 val isYouTubeRequested = downloadQuality == LosslessMusicApi.QUALITY_YOUTUBE
 
                 // 1. Provider module (.lwp engine): progressive clear FLAC/MP3 or segmented DASH (Dolby Atmos / Tidal Hi-Res)
