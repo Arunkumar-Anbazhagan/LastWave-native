@@ -1029,6 +1029,21 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
+    private fun useSystemMediaStyle(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU || isChineseOemSkin()
+
+    /** Heavily-skinned ROMs whose lockscreen/panel only honor standard MediaStyle. */
+    private fun isChineseOemSkin(): Boolean {
+        val m = Build.MANUFACTURER.lowercase()
+        return m.contains("vivo") || m.contains("iqoo") ||
+            m.contains("oppo") || m.contains("oneplus") || m.contains("realme") ||
+            m.contains("xiaomi") || m.contains("redmi") || m.contains("poco") ||
+            m.contains("huawei") || m.contains("honor") ||
+            m.contains("nubia") || m.contains("zte") ||
+            m.contains("tecno") || m.contains("infinix") || m.contains("itel") ||
+            m.contains("meizu")
+    }
+
     private fun buildNotification(state: MusicPlayerState, art: Bitmap?): Notification {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
@@ -1036,11 +1051,15 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             @Suppress("DEPRECATION") Notification.Builder(this)
         }
 
-        // On Android 13+ (API 33+, Tiramisu), SystemUI / Samsung One UI 5/6/7
-        // hosts the media player natively via MediaStyle and SecMediaHost.
-        // Providing custom RemoteViews conflicts with the system media carousel
-        // causing notifications to be dropped or rejected by Samsung SystemUI.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        // System-rendered MediaStyle path. Used on Android 13+ (SystemUI /
+        // Samsung One UI host the player natively and reject custom
+        // RemoteViews) and on Chinese-OEM skins (Vivo/OriginOS, OPPO/ColorOS,
+        // OnePlus, Realme, Xiaomi/HyperOS, Huawei/EMUI, Honor, …): their
+        // lockscreen + control-center media cards never render third-party
+        // custom RemoteViews — they draw their own card from the MediaSession,
+        // so the material custom views would mean no controls at all there.
+        // Everywhere else (Pixels, Motorola, …) the custom views survive.
+        if (useSystemMediaStyle()) {
             val mediaStyle = Notification.MediaStyle()
                 .setShowActionsInCompactView(0, 1, 2)
             platformSessionToken?.let { mediaStyle.setMediaSession(it) }
@@ -1312,8 +1331,13 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         runCatching {
-            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW).apply {
+            val nm = getSystemService(NotificationManager::class.java) ?: return
+            // Lockscreen media cards on Vivo/Chinese ROMs are suppressed on
+            // LOW importance. Importance is immutable once created, so v2
+            // (DEFAULT) replaces the legacy LOW channel outright.
+            runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_DEFAULT).apply {
                     description = "Native LastWave playback controls"
                     setShowBadge(false)
                 },
@@ -1333,7 +1357,8 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         const val CONTENT_STYLE_LIST = 1
         const val MAX_CAR_QUEUE_ITEMS = 100
         const val MAX_CAR_QUEUE_BEFORE_CURRENT = 50
-        const val CHANNEL_ID = "lastwave_playback"
+        const val CHANNEL_ID = "lastwave_playback_v2"
+        const val LEGACY_CHANNEL_ID = "lastwave_playback"
         const val NOTIFICATION_ID = 4102
         const val ACTION_PREVIOUS = "com.lastwave.app.playback.PREVIOUS"
         const val ACTION_TOGGLE = "com.lastwave.app.playback.TOGGLE"
