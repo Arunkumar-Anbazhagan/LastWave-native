@@ -182,6 +182,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -229,6 +230,7 @@ import com.hakim.liquify.backdrops.rememberLayerBackdrop
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 enum class FullPlayerTab {
     NOW_PLAYING,
@@ -2836,6 +2838,26 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
             dragOffsetY = 0f
         }
     }
+    // Follow the now-playing song in long queues: auto-scroll on every track
+    // change (and on first open), unless the user is dragging or has manually
+    // scrolled within the last few seconds. The eye button still jumps on demand.
+    var userScrollHoldUntil by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) userScrollHoldUntil = System.currentTimeMillis() + 3_000L
+    }
+    LaunchedEffect(state.currentIndex, state.queue.size) {
+        if (draggingIndex != -1 || state.queue.isEmpty()) return@LaunchedEffect
+        if (System.currentTimeMillis() < userScrollHoldUntil) return@LaunchedEffect
+        val target = state.currentIndex.coerceIn(0, state.queue.size - 1)
+        runCatching { listState.animateScrollToItem(target) }
+    }
+    // True upcoming play order (shuffle/repeat aware). Under shuffle the list
+    // below stays in playlist order, so without this strip you can never tell
+    // what plays next — and Play-next adds look "lost".
+    val shuffleUpcoming = remember(state.queue, state.currentIndex, state.shuffleEnabled, state.repeatMode) {
+        if (state.shuffleEnabled) runCatching { player.peekUpcomingIndices(3) }.getOrDefault(emptyList())
+        else emptyList()
+    }.filter { it in state.queue.indices && it != state.currentIndex }
 
     Column(modifier) {
         Row(
@@ -2868,6 +2890,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
             }
             IconButton(
                 onClick = {
+                    userScrollHoldUntil = 0L
                     scope.launch { listState.animateScrollToItem(state.currentIndex.coerceAtLeast(0)) }
                 },
                 enabled = state.currentIndex >= 0 && state.currentIndex < state.queue.size,
@@ -2883,6 +2906,66 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                 )
             }
 
+        }
+        if (shuffleUpcoming.isNotEmpty()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.White.copy(alpha = 0.08f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    "Up next in shuffle order",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.60f),
+                    fontWeight = FontWeight.Bold,
+                )
+                shuffleUpcoming.forEachIndexed { order, queueIndex ->
+                    val item = state.queue[queueIndex]
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { player.seekToQueueItem(queueIndex) }
+                            .padding(horizontal = 4.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "${order + 1}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.width(20.dp),
+                        )
+                        Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                            Text(
+                                item.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.92f),
+                            )
+                            Text(
+                                item.artist,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.60f),
+                            )
+                        }
+                        Text(
+                            "#${queueIndex + 1}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.40f),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
         }
         LazyColumn(
             state = listState,
@@ -2941,6 +3024,15 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                         Modifier.fillMaxWidth().padding(9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Text(
+                            "${index + 1}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isCurrent) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.width(30.dp),
+                        )
                         PlayerArtwork(item, Modifier.size(50.dp), 13.dp)
                         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                             Text(
@@ -3071,17 +3163,18 @@ internal fun formatTime(ms: Long): String {
 }
 
 private fun qualityLabel(state: MusicPlayerState): String = when {
-    // Lossless with known bit depth / sampling rate → show precise format
+    // Lossless with known bit depth / sampling rate → resolution, never kbps.
     state.isLossless && state.bitDepth != null && state.samplingRateKHz != null -> {
-        val rate = if (state.samplingRateKHz % 1.0 == 0.0) state.samplingRateKHz.toInt().toString()
-        else state.samplingRateKHz.toString()
-        "FLAC ${state.bitDepth}/$rate"
+        val rounded = (state.samplingRateKHz * 10).roundToInt() / 10.0
+        val rate = if (rounded % 1.0 == 0.0) rounded.toInt().toString() else rounded.toString()
+        "${state.bitDepth}-bit / $rate kHz"
     }
-    state.isLossless && state.audioCodec == "MP3 320k" -> "MP3 320k"
+    state.isLossless && state.audioCodec == "MP3 320k" -> "MP3 320 kbps"
+    // Lossless without measured depth/rate → badge text, never raw kbps.
     state.isLossless -> state.audioCodec ?: "LOSSLESS"
-    // YouTube with known codec + bitrate → e.g. "OPUS 160k" or "AAC 256k"
-    state.audioCodec != null && state.bitrateKbps != null -> "${state.audioCodec} ${state.bitrateKbps}k"
-    state.audioCodec != null -> state.audioCodec
+    // YouTube lossy → e.g. "OPUS 138 kbps" or "AAC 131 kbps".
+    state.audioCodec != null && state.bitrateKbps != null -> "${state.audioCodec.uppercase()} ${state.bitrateKbps} kbps"
+    state.audioCodec != null -> state.audioCodec.uppercase()
     state.bitrateKbps != null -> "${state.bitrateKbps} kbps"
     else -> "AUDIO"
 }
