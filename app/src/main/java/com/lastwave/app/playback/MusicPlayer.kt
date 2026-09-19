@@ -289,6 +289,17 @@ class MusicPlayer @Inject constructor(
     private val radioUsedSeeds = ConcurrentHashMap.newKeySet<String>()
     private var unavailableSkipJob: Job? = null
     private val unavailableMediaIds = mutableSetOf<String>()
+    /**
+     * Explicit listening history (mediaIdKeys, oldest first) so Previous
+     * under shuffle returns the song actually heard. ExoPlayer's internal
+     * shuffle permutation is rebuilt on toggle, crossfade handoff and queue
+     * edits, so previousMediaItemIndex rarely points at the last-heard song.
+     * Keys (not indices) survive queue insertions/removals; stale keys are
+     * skipped on pop. Main-thread only.
+     */
+    private val playHistory = ArrayDeque<String>()
+    /** Guards the near-end late-preload so it fires once per upcoming item. */
+    private var latePreloadKey: String? = null
     private var sleepTimerDeadlineMs: Long? = null
     private var sleepTimerStep = 0
     @Volatile
@@ -435,6 +446,12 @@ class MusicPlayer @Inject constructor(
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (isCasting) return
             recordLocalListenSignal(reason)
+            // Natural advances (track end, repeat-all wrap, crossfade
+            // handoff) are the only transitions the explicit next()/queue-tap
+            // paths don't record — manual seeks arrive as SEEK, not AUTO.
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                recordHistory(_state.value.current?.mediaIdKey())
+            }
             if (mediaItem != null) {
                 losslessBypassMediaIds.retainAll(setOf(mediaItem.mediaId))
                 if (retryMediaId != mediaItem.mediaId) {
@@ -876,6 +893,31 @@ class MusicPlayer @Inject constructor(
 
                     if (updateCrossfade(pos, dur)) continue
 
+                    // Second-chance preload: the track-start preload may have
+                    // failed, been skipped (paused then) or resolved too slowly.
+                    // Without this, the natural transition lands on an
+                    // unresolved placeholder -> audible gap, then an error and
+                    // an auto-skip to the following song ("glitch then skips").
+                    // Fires once per upcoming item inside the last 30s.
+                    if (player.isPlaying && dur > 0L) {
+                        val remainingMs = dur - pos
+                        if (remainingMs in 1..30_000L && preloadJob?.isActive != true) {
+                            val upcomingIndex = player.nextMediaItemIndex
+                            if (upcomingIndex != C.INDEX_UNSET &&
+                                upcomingIndex in 0 until player.mediaItemCount &&
+                                upcomingIndex != player.currentMediaItemIndex
+                            ) {
+                                val upcomingItem = player.getMediaItemAt(upcomingIndex)
+                                if (upcomingItem.localConfiguration?.uri?.scheme == "lastwave" &&
+                                    upcomingItem.mediaId != latePreloadKey
+                                ) {
+                                    latePreloadKey = upcomingItem.mediaId
+                                    preloadNextQueueItem(player.currentMediaItemIndex)
+                                }
+                            }
+                        }
+                    }
+
                     // Stream-health sampling: effective clock drift + glitch
                     // watch, 1 Hz while playing. Feeds the signal-path popup.
                     val tickerNow = SystemClock.elapsedRealtime()
@@ -993,6 +1035,8 @@ class MusicPlayer @Inject constructor(
         queueEnrichmentJob?.cancel()
         unavailableSkipJob?.cancel()
         unavailableMediaIds.clear()
+        playHistory.clear()
+        latePreloadKey = null
         radioQueueActive = startRadio
         startResolvedQueuePlayback(
             tracks = listOf(track),
@@ -1039,6 +1083,10 @@ class MusicPlayer @Inject constructor(
         queueEnrichmentJob?.cancel()
         unavailableSkipJob?.cancel()
         unavailableMediaIds.clear()
+        // Fresh queue context: previous-queue history no longer applies.
+        // (Same-queue navigations via startResolvedQueuePlayback keep it.)
+        playHistory.clear()
+        latePreloadKey = null
 
         startResolvedQueuePlayback(
             tracks = tracks,
@@ -1246,6 +1294,9 @@ class MusicPlayer @Inject constructor(
                 }
                 val index = (player.currentMediaItemIndex + 1).coerceAtMost(player.mediaItemCount)
                 player.addMediaItem(index, enriched.toMediaItem())
+                // Under shuffle the insert lands at a random permutation spot;
+                // pin it directly after the current track so it truly plays next.
+                placeInsertedIndexInShuffleOrder(index, last = false)
             }
         }
     }
@@ -1259,6 +1310,9 @@ class MusicPlayer @Inject constructor(
                     persistPlaybackSession()
                 } else {
                     player.addMediaItem(enriched.toMediaItem())
+                    // Under shuffle the append lands at a random permutation
+                    // spot; pin it at the end of the actual play order.
+                    placeInsertedIndexInShuffleOrder(player.mediaItemCount - 1, last = true)
                 }
             }
         }
@@ -1765,6 +1819,14 @@ class MusicPlayer @Inject constructor(
             }
             return@onMain
         }
+        val snapshot = _state.value
+        // Manual queue jump to a different track: the departing song becomes
+        // "previously heard" for shuffle-Previous. previous() navigates via
+        // resolveAndPlayQueueItem/playPendingQueueItem directly so popping
+        // history never re-records the song we just left.
+        if (index in snapshot.queue.indices && index != snapshot.currentIndex) {
+            recordHistory(snapshot.current?.mediaIdKey())
+        }
         if (index in 0 until player.mediaItemCount) {
             resolveAndPlayQueueItem(index)
         } else {
@@ -1782,7 +1844,12 @@ class MusicPlayer @Inject constructor(
         if (player.currentPosition > 5_000) {
             player.seekTo(0)
         } else {
-            val index = player.previousMediaItemIndex.takeIf { it != C.INDEX_UNSET }
+            // Under shuffle, ExoPlayer's permutation previous is almost never
+            // the song just heard (rebuilt on toggle/handoff/edits) — walk
+            // the explicit listening history first.
+            val historyIndex = if (pendingState.shuffleEnabled) popHistoryIndex(pendingState) else null
+            val index = historyIndex
+                ?: player.previousMediaItemIndex.takeIf { it != C.INDEX_UNSET }
                 ?: previousQueueIndex(pendingState)
             index.takeIf { it != C.INDEX_UNSET }?.let {
                 if (it in 0 until player.mediaItemCount) resolveAndPlayQueueItem(it)
@@ -1796,12 +1863,94 @@ class MusicPlayer @Inject constructor(
             return@onMain
         }
         val pendingState = _state.value
+        recordHistory(pendingState.current?.mediaIdKey())
         val index = player.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET }
             ?: nextQueueIndex(pendingState)
         index.takeIf { it != C.INDEX_UNSET }?.let {
             if (it in 0 until player.mediaItemCount) resolveAndPlayQueueItem(it)
             else playPendingQueueItem(it, pendingState)
         }
+    }
+
+    private fun recordHistory(mediaIdKey: String?) {
+        if (mediaIdKey.isNullOrBlank()) return
+        if (playHistory.lastOrNull() == mediaIdKey) return
+        playHistory.addLast(mediaIdKey)
+        while (playHistory.size > MAX_PLAY_HISTORY) playHistory.removeFirst()
+    }
+
+    /**
+     * Newest history entry that still exists in [snapshot]'s queue and isn't
+     * the current track, resolved to its present queue index (or null).
+     */
+    private fun popHistoryIndex(snapshot: MusicPlayerState): Int? {
+        val currentKey = snapshot.current?.mediaIdKey()
+        while (playHistory.isNotEmpty()) {
+            val key = playHistory.removeLast()
+            if (key == currentKey) continue
+            val index = snapshot.queue.indexOfFirst { it.mediaIdKey() == key }
+            if (index >= 0) return index
+        }
+        return null
+    }
+
+    /**
+     * Next queue indices in true playback order (shuffle/repeat aware) for
+     * queue UI. Must be called on the main thread; falls back to logical
+     * queue order when the engine isn't initialized yet.
+     */
+    fun peekUpcomingIndices(limit: Int = 3): List<Int> {
+        val safeLimit = limit.coerceIn(1, 10)
+        if (playerDelegate.isInitialized() && !player.currentTimeline.isEmpty) {
+            val out = mutableListOf<Int>()
+            var next = player.currentTimeline.getNextWindowIndex(
+                player.currentMediaItemIndex, player.repeatMode, player.shuffleModeEnabled,
+            )
+            var guard = 0
+            while (next != C.INDEX_UNSET && out.size < safeLimit && guard++ < player.mediaItemCount + 2) {
+                if (next == player.currentMediaItemIndex) break
+                if (next in 0 until player.mediaItemCount &&
+                    player.getMediaItemAt(next).mediaId !in unavailableMediaIds
+                ) {
+                    out.add(next)
+                }
+                next = player.currentTimeline.getNextWindowIndex(next, player.repeatMode, player.shuffleModeEnabled)
+            }
+            return out
+        }
+        val snapshot = _state.value
+        if (snapshot.queue.isEmpty() || snapshot.currentIndex !in snapshot.queue.indices) return emptyList()
+        return ((snapshot.currentIndex + 1) until minOf(snapshot.currentIndex + 1 + safeLimit, snapshot.queue.size)).toList()
+    }
+
+    /**
+     * Under shuffle, an inserted timeline item lands at a random permutation
+     * spot — "Play next" wouldn't play next and "Add to queue" wouldn't play
+     * last. Splice [index] into the live shuffle permutation instead:
+     * [last] = false puts it directly after the current track, true appends
+     * it at the end of the play order. Main thread only.
+     */
+    @MainThread
+    private fun placeInsertedIndexInShuffleOrder(index: Int, last: Boolean) {
+        if (!player.shuffleModeEnabled) return
+        val timeline = player.currentTimeline
+        if (timeline.isEmpty || index !in 0 until player.mediaItemCount) return
+        val order = mutableListOf<Int>()
+        var cursor = timeline.getFirstWindowIndex(true)
+        var guard = 0
+        while (cursor != C.INDEX_UNSET && guard++ < player.mediaItemCount + 1) {
+            order.add(cursor)
+            cursor = timeline.getNextWindowIndex(cursor, Player.REPEAT_MODE_OFF, true)
+        }
+        if (index !in order) return
+        order.remove(index)
+        if (last) {
+            order.add(index)
+        } else {
+            val at = (order.indexOf(player.currentMediaItemIndex) + 1).coerceIn(0, order.size)
+            order.add(at, index)
+        }
+        player.setShuffleOrder(DefaultShuffleOrder(order.toIntArray(), Random.nextLong()))
     }
 
     private fun nextQueueIndex(state: MusicPlayerState): Int {
@@ -3733,6 +3882,8 @@ class MusicPlayer @Inject constructor(
         const val CURRENT_TRACK_CACHE_MAX_BYTES = 48L * 1024 * 1024
         const val CURRENT_TRACK_CACHE_MAX_SKIP_WINDOWS = 64
         const val MAX_PREPARED_STREAMS = 256
+        /** Cap for the explicit shuffle-Previous listening history. */
+        const val MAX_PLAY_HISTORY = 100
         const val RESOLVED_URL_EXPIRY_MARGIN_MS = 2 * 60 * 1000L
         /** Module lookups must never stall the YouTube fallback behind them. */
         const val MODULE_RESOLVE_TIMEOUT_MS = 6_000L
