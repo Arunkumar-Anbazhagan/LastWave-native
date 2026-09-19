@@ -298,7 +298,7 @@ fun Modifier.liquidGlassChrome(
  * The refraction/blur itself comes from [liquify]; this is only the
  * legibility veil — kept separate so it never triggers a second blur pass.
  */
-private fun fallbackTintOnly(shape: Shape): Modifier = drawWithCache {
+private fun Modifier.fallbackTintOnly(shape: Shape): Modifier = drawWithCache {
     if (!size.width.isFinite() || !size.height.isFinite() || size.width <= 0f || size.height <= 0f) {
         return@drawWithCache onDrawWithContent { drawContent() }
     }

@@ -926,11 +926,17 @@ class MusicPlayer @Inject constructor(
             settingsPreferences.settings.collect { settings ->
                 crossfadeEnabled = settings.crossfadeEnabled
                 crossfadeDurationMs = settings.crossfadeSeconds.coerceIn(1, 12) * 1000L
+                val wasBitPerfect = bitPerfectEnabled
                 bitPerfectEnabled = settings.isBitPerfectEnabled
                 updateBitPerfectState()
                 if (bitPerfectEnabled && settings.isStudioMasterClarityEnabled) {
                     // Self-heal: both must never be on — Bit-Perfect wins.
                     settingsPreferences.setStudioMasterClarity(false)
+                }
+                if (bitPerfectEnabled && !wasBitPerfect) {
+                    // Freshly engaged: ask for direct USB access right away so
+                    // the DAC route is usable without hunting for the dialog.
+                    maybeRequestUsbPermission()
                 }
                 onMain {
                     applyDacRoutingFor(currentSourceRateHz())
@@ -957,6 +963,11 @@ class MusicPlayer @Inject constructor(
 
         applicationScope.launch {
             usbDacMonitor.state.collect {
+                if (bitPerfectEnabled) {
+                    // DAC (re)attached while engaged: prompt once per device
+                    // so a deny isn't nagged on every mixer refresh.
+                    maybeRequestUsbPermission()
+                }
                 onMain {
                     applyDacRoutingFor(currentSourceRateHz())
                     updateSignalPath()
@@ -1530,14 +1541,36 @@ class MusicPlayer @Inject constructor(
             "BIT-PERFECT REQUEST enabled=$effectiveBitPerfect nativeApplied=$nativeBitPerfectApplied " +
                 "(primary=$primaryOk secondary=$secondaryOk)",
         )
-        // Volume policy lives here (not only on DAC route/resolve events) so
-        // flipping the toggle mid-playback maxes/restores immediately, with
-        // or without a USB DAC attached.
+        // Volume settles here (not only on DAC route/resolve events) so a
+        // legacy auto-max restore owed by older builds is settled promptly
+        // when the toggle flips, with or without a USB DAC attached.
         manageDacSystemVolume(effectiveBitPerfect)
     }
 
     /** Forwards USB-access permission requests to [UsbDacMonitor]. */
     fun requestUsbPermission() = usbDacMonitor.requestPermission()
+
+    /** Device key already prompted for USB access (deny = no nagging). */
+    private var usbPermissionPromptedKey: String? = null
+
+    /**
+     * Asks for direct USB access when Bit-Perfect is on and a USB audio
+     * peripheral is present but not yet granted. Once per device: a deny is
+     * respected until the DAC is detached (which clears the key via null).
+     * No peripheral / already granted / toggle off = silent no-op.
+     */
+    private fun maybeRequestUsbPermission() {
+        if (!bitPerfectEnabled) return
+        val dac = usbDacMonitor.state.value.dac ?: run {
+            usbPermissionPromptedKey = null
+            return
+        }
+        if (!dac.hasUsbPeripheral || dac.usbPermissionGranted) return
+        val key = "${dac.vendorId}:${dac.productId}:${dac.name}"
+        if (usbPermissionPromptedKey == key) return
+        usbPermissionPromptedKey = key
+        runCatching { usbDacMonitor.requestPermission() }
+    }
 
     private fun findOutputDevice(deviceId: Int): AudioDeviceInfo? = runCatching {
         audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
@@ -1578,38 +1611,29 @@ class MusicPlayer @Inject constructor(
                 "dac=${dac?.name} routed=${device != null} bitPerfect=$bitPerfectEnabled",
         )
         usbDacMonitor.setRouteRequested(device != null)
-        // Volume policy is a Bit-Perfect property, not a DAC property: any
-        // non-max music stream is digitally attenuated first, which alone
-        // defeats bit-perfect even on the phone output. (DAC routing above
+        // Volume is a Bit-Perfect property, not a DAC property: it stays
+        // fully user-controlled (never forced to MAX), and the verdict
+        // reports scaled output honestly until unity. (DAC routing above
         // stays untouched.)
         manageDacSystemVolume(bitPerfectEnabled)
     }
 
     /**
-     * Bulletproofing: a non-max music stream is digitally attenuated before
-     * output, which alone defeats bit-perfect. While Bit-Perfect is engaged,
-     * raise it to MAX once and restore the user's level when it is switched
-     * off. Fixed-volume routes are left alone, and a manual change
-     * mid-session is respected and never overwritten or restored.
+     * Volume stays workable in Bit-Perfect: the app never forces the system
+     * level to MAX, so the keys always do something and there is no ear-blast
+     * on engage. Below-unity gain is applied in software on the direct sink
+     * path (a granted BIT_PERFECT bypass ignores AudioTrack volume), and the
+     * signal-path verdict honestly reports scaled output until unity — MAX
+     * (or a hardware-volume route) is still the only bit-exact state.
+     * A manual change mid-session is respected and never overwritten.
      *
-     * The session (saved level + managed flag) is persisted, not just held
-     * in memory: otherwise a process restart while engaged strands the
-     * volume at max forever, because the fresh process no longer knows a
-     * restore is owed when the toggle is switched off.
+     * The persisted session below only settles restores owed by older builds
+     * that used to auto-max; this build never strands the level at max.
      */
     private fun manageDacSystemVolume(engaged: Boolean) {
+        if (engaged) return
         val manager = audioManager ?: return
-        if (engaged && !dacVolumeManaged && !persistedVolumeManaged()) {
-            val max = runCatching { manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }.getOrDefault(0)
-            val current = runCatching { manager.getStreamVolume(AudioManager.STREAM_MUSIC) }.getOrDefault(0)
-            val fixed = runCatching { manager.isVolumeFixed() }.getOrNull() == true
-            if (!fixed && max > 0 && current < max) {
-                savedSystemVolume = current
-                runCatching { manager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0) }
-                dacVolumeManaged = true
-                persistVolumeSession(saved = current, managed = true)
-            }
-        } else if (!engaged && (dacVolumeManaged || persistedVolumeManaged())) {
+        if (dacVolumeManaged || persistedVolumeManaged()) {
             dacVolumeManaged = false
             val saved = savedSystemVolume.takeIf { it >= 0 } ?: persistedSavedVolume()
             val max = runCatching { manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }.getOrDefault(0)
@@ -1699,6 +1723,10 @@ class MusicPlayer @Inject constructor(
         }
         val dspBypassActuallyActive =
             bitPerfectEnabled && nativeBitPerfectApplied && sinkDirect && !sinkStale
+        val mixerBypassGranted = audioSinks.any {
+            runCatching { it.isPlatformBitPerfectConfigured() }.getOrDefault(false)
+        }
+        val routedRequested = routedDacDeviceId != null && routedDacDeviceId == dac?.deviceId
         _signalPath.value = evaluateSignalPath(
             SignalPathInput(
                 sourceLabel = srcLabel,
@@ -1707,9 +1735,7 @@ class MusicPlayer @Inject constructor(
                 isLossless = snapshot.isLossless,
                 appOutputRateHz = appRateHz,
                 platformMixerRateHz = platformRateHz,
-                platformBitPerfectConfigured = audioSinks.any {
-                    runCatching { it.isPlatformBitPerfectConfigured() }.getOrDefault(false)
-                },
+                platformBitPerfectConfigured = mixerBypassGranted,
                 dspBypassEnabled = dspBypassActuallyActive,
                 crossfadeMixing = outgoingPlayer != null,
                 speed = speed,
@@ -1718,7 +1744,10 @@ class MusicPlayer @Inject constructor(
                 systemVolumeMax = sysMax,
                 systemVolumeFixed = sysFixed,
                 dac = dac,
-                routedToDac = routedDacDeviceId != null && routedDacDeviceId == dac?.deviceId,
+                routedToDac = routedRequested,
+                // Requested != granted: raw output only when the platform
+                // actually bypassed the shared mixer on the DAC route.
+                routeVerified = routedRequested && mixerBypassGranted && sinkDirect && !sinkStale,
                 driftPpm = healthTracker.driftPpm,
                 glitchCount = healthTracker.glitchCount,
                 isPlaying = snapshot.isPlaying,

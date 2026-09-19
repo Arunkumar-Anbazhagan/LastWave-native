@@ -1055,6 +1055,10 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                 else -> "Repeat off"
             }
 
+            // Hosts that can't render custom views (cars, watches, DeX text
+            // rows) show these titles verbatim — "Play or pause" looked broken,
+            // so the play action always reads the actual current state.
+            val playPauseLabel = if (state.isPlaying) "Pause" else "Play"
             return builder
                 .setSmallIcon(R.drawable.ic_launcher_logo)
                 .setContentTitle(state.current?.title ?: "LastWave")
@@ -1070,7 +1074,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setStyle(mediaStyle)
                 .addAction(Notification.Action.Builder(R.drawable.ic_widget_skip_previous, "Previous", serviceAction(ACTION_PREVIOUS, 1)).build())
-                .addAction(Notification.Action.Builder(if (state.isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play, "Play or pause", serviceAction(ACTION_TOGGLE, 2)).build())
+                .addAction(Notification.Action.Builder(if (state.isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play, playPauseLabel, serviceAction(ACTION_TOGGLE, 2)).build())
                 .addAction(Notification.Action.Builder(R.drawable.ic_widget_skip_next, "Next", serviceAction(ACTION_NEXT, 3)).build())
                 .addAction(Notification.Action.Builder(R.drawable.ic_widget_shuffle, if (state.shuffleEnabled) "Shuffle on" else "Shuffle off", serviceAction(ACTION_SHUFFLE, 5)).build())
                 .addAction(Notification.Action.Builder(repeatIcon, repeatLabel, serviceAction(ACTION_REPEAT, 6)).build())
@@ -1095,7 +1099,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         val expanded = notificationRemoteViews(
             layout = R.layout.notification_player_expanded,
             widthDp = 520,
-            heightDp = 128,
+            heightDp = EXPANDED_HEIGHT_DP,
             state = state,
             art = art,
             expanded = true,
@@ -1137,16 +1141,20 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             .setCustomBigContentView(expanded)
             .setCustomHeadsUpContentView(compact)
             .addAction(Notification.Action.Builder(R.drawable.ic_widget_skip_previous, "Previous", serviceAction(ACTION_PREVIOUS, 1)).build())
-            .addAction(Notification.Action.Builder(if (state.isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play, "Play or pause", serviceAction(ACTION_TOGGLE, 2)).build())
+            .addAction(Notification.Action.Builder(if (state.isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play, if (state.isPlaying) "Pause" else "Play", serviceAction(ACTION_TOGGLE, 2)).build())
             .addAction(Notification.Action.Builder(R.drawable.ic_widget_skip_next, "Next", serviceAction(ACTION_NEXT, 3)).build())
-            .addAction(Notification.Action.Builder(R.drawable.ic_widget_shuffle, "Shuffle", serviceAction(ACTION_SHUFFLE, 5)).build())
+            .addAction(Notification.Action.Builder(R.drawable.ic_widget_shuffle, if (state.shuffleEnabled) "Shuffle on" else "Shuffle off", serviceAction(ACTION_SHUFFLE, 5)).build())
             .addAction(
                 Notification.Action.Builder(
                     when (state.repeatMode) {
                         androidx.media3.common.Player.REPEAT_MODE_ONE -> R.drawable.ic_widget_repeat_one
                         else -> R.drawable.ic_widget_repeat
                     },
-                    "Repeat",
+                    when (state.repeatMode) {
+                        androidx.media3.common.Player.REPEAT_MODE_ONE -> "Repeat one"
+                        androidx.media3.common.Player.REPEAT_MODE_ALL -> "Repeat all"
+                        else -> "Repeat off"
+                    },
                     serviceAction(ACTION_REPEAT, 6),
                 ).build(),
             )
@@ -1170,7 +1178,9 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     ): RemoteViews = RemoteViews(packageName, layout).apply {
         val palette = notificationPalette
         setImageViewBitmap(R.id.notification_background, glassBackground(widthDp, heightDp, palette))
-        if (art != null) setImageViewBitmap(R.id.notification_artwork, scaledBitmap(art, 192))
+        // Expanded art is shown at 96dp (288px @3x); compact at 54dp where
+        // 192px is already sharp. Two sizes keep the Binder parcel small.
+        if (art != null) setImageViewBitmap(R.id.notification_artwork, scaledBitmap(art, if (expanded) 288 else 192))
         else setImageViewResource(R.id.notification_artwork, R.mipmap.ic_launcher)
         setTextViewText(R.id.notification_title, state.current?.title ?: "LastWave")
         setTextViewText(R.id.notification_artist, state.current?.artist ?: "Music player")
@@ -1237,26 +1247,38 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         // transaction limit. The ImageView stretches this small gradient.
         val width = widthDp.coerceAtLeast(1)
         val height = heightDp.coerceAtLeast(1)
-        val radius = 26f
+        val radius = 30f
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val bounds = RectF(0f, 0f, width.toFloat(), height.toFloat())
+        // Deeper accent blend than before: the old 0.20/0.13 wash read as
+        // flat grey on wide hosts (DeX, cars) with white text on top.
         val start = ColorUtils.setAlphaComponent(
-            ColorUtils.blendARGB(palette.surface, palette.primary, 0.20f),
-            232,
+            ColorUtils.blendARGB(palette.surface, palette.primary, 0.34f),
+            242,
+        )
+        val mid = ColorUtils.setAlphaComponent(
+            ColorUtils.blendARGB(palette.surface, palette.primary, 0.18f),
+            236,
         )
         val end = ColorUtils.setAlphaComponent(
-            ColorUtils.blendARGB(palette.surface, palette.tertiary, 0.13f),
-            218,
+            ColorUtils.blendARGB(palette.surface, palette.tertiary, 0.26f),
+            230,
         )
         val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(0f, 0f, width.toFloat(), height.toFloat(), start, end, Shader.TileMode.CLAMP)
+            shader = LinearGradient(
+                0f, 0f, width.toFloat(), height.toFloat(),
+                intArrayOf(start, mid, end), floatArrayOf(0f, 0.55f, 1f),
+                Shader.TileMode.CLAMP,
+            )
         }
         canvas.drawRoundRect(bounds, radius, radius, fill)
+        // Crisp edge definition: hairline top highlight + soft inner shadow
+        // so the card doesn't melt into the shade background when stretched.
         val highlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = ColorUtils.setAlphaComponent(palette.onSurface, 35)
+            color = ColorUtils.setAlphaComponent(palette.onSurface, 52)
             style = Paint.Style.STROKE
-            strokeWidth = 1f
+            strokeWidth = 1.5f
         }
         canvas.drawRoundRect(
             RectF(1f, 1f, width - 1f, height - 1f),
@@ -1302,6 +1324,10 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     }
 
     private companion object {
+        // Expanded RemoteViews content needs ~117dp (brand + title + artist +
+        // album + 44dp controls + margins); 128dp clipped the transport row
+        // whenever the album line was visible. 152dp leaves breathing room.
+        const val EXPANDED_HEIGHT_DP = 152
         const val CONTENT_STYLE_BROWSABLE_HINT = "android.media.browse.CONTENT_STYLE_BROWSABLE_HINT"
         const val CONTENT_STYLE_PLAYABLE_HINT = "android.media.browse.CONTENT_STYLE_PLAYABLE_HINT"
         const val CONTENT_STYLE_LIST = 1
