@@ -3097,7 +3097,7 @@ class MusicPlayer @Inject constructor(
         }
 
         val misc = runCatching { settingsPreferences.settings.first() }.getOrDefault(MiscSettings())
-        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.dolbyAtmosEnabled, misc.preferLosslessStreaming, excludedLosslessUrls, allowLocalDownloads)
+        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.dolbyAtmosEnabled, misc.preferLosslessStreaming, misc.preferProviderModules, excludedLosslessUrls, allowLocalDownloads)
         val now = SystemClock.elapsedRealtime()
         resolutionRequests.entries.removeIf { now - it.value.first > 60_000L }
         if (resolutionRequests.size >= 64) {
@@ -3127,7 +3127,11 @@ class MusicPlayer @Inject constructor(
         misc: MiscSettings,
         excludedLosslessUrls: Set<String>,
     ): ResolvedStream {
-        val isYouTubeRequested = !allowLossless || misc.losslessQuality == com.lastwave.app.data.lossless.LosslessMusicApi.QUALITY_YOUTUBE || !misc.preferLosslessStreaming
+        // Modules toggle OFF -> YouTube instantly via the early return below.
+        // The module branch is never launched nor awaited, so playback can't
+        // stall behind it. (No modules installed behaves the same: resolve()
+        // finds zero handles and returns null in ms while YouTube is in flight.)
+        val isYouTubeRequested = !allowLossless || misc.losslessQuality == com.lastwave.app.data.lossless.LosslessMusicApi.QUALITY_YOUTUBE || !misc.preferLosslessStreaming || !misc.preferProviderModules
         if (isYouTubeRequested || (!videoId.isNullOrBlank() &&
                 (track.artist.isBlank() || track.artist.equals("Unknown artist", ignoreCase = true)))
         ) return resolveYoutubeTrackAudioStream(track, videoId)
@@ -3138,11 +3142,20 @@ class MusicPlayer @Inject constructor(
         }
         // Provider module (.lwp engine) resolution
         val moduleDeferred = applicationScope.async(Dispatchers.IO) {
-            if (!allowLossless || !misc.preferLosslessStreaming) null
+            if (!allowLossless || !misc.preferLosslessStreaming || !misc.preferProviderModules) null
             else runCatching { resolveModuleTrackAudioStream(track, misc, excludedLosslessUrls) }.getOrNull()
         }
         return try {
-            val moduleStream = if (allowLossless && misc.preferLosslessStreaming) {
+            // Strict module priority: wait for the module verdict first.
+            // Inside the module Qobuz + Tidal already run at the same time
+            // (provider.js raceFirstValid) and rejection counts only when
+            // BOTH backends reject. YouTube is used only after the module
+            // returns null (or the 6s backstop hits). YouTube extraction
+            // still starts together with the module above, so on rejection
+            // its result is usually already in hand — but it never preempts
+            // a pending module hit.
+            val wantModule = allowLossless && misc.preferLosslessStreaming && misc.preferProviderModules
+            val moduleStream: ResolvedStream? = if (wantModule) {
                 withTimeoutOrNull(MODULE_RESOLVE_TIMEOUT_MS) { moduleDeferred.await() }
             } else null
 
