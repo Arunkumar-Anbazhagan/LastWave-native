@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Lock
@@ -762,6 +763,15 @@ fun PlaylistDetailScreen(
                                 onClick = {
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     viewModel.downloadPlaylist(playlistId)
+                                    overflowMenuOpen = false
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Cancel playlist downloads") },
+                                leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null) },
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    viewModel.cancelPlaylistDownloads(playlistId)
                                     overflowMenuOpen = false
                                 },
                             )

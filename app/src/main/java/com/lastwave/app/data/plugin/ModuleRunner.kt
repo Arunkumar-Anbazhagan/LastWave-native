@@ -198,15 +198,15 @@ class ModuleRunner @Inject constructor(
 
     private fun namespaceScript(): String =
         "globalThis.LastWave=Object.assign(globalThis.LastWave||{},{" +
-            "httpRequest:a=>globalThis.__lw_httpRequest(a)," +
-            "rsaSign:a=>globalThis.__lw_rsaSign(a)," +
+            "httpRequest:a=>{var s=typeof a==='string'?a:JSON.stringify(a);var r=globalThis.__lw_httpRequest(s);try{return JSON.parse(r);}catch(_){return r;}}," +
+            "rsaSign:a=>globalThis.__lw_rsaSign(typeof a==='string'?a:JSON.stringify(a))," +
             "b64decode:a=>globalThis.__lw_b64decode(a)," +
             "b64encode:a=>globalThis.__lw_b64encode(a)," +
             "storeGet:a=>globalThis.__lw_storeGet(a)," +
-            "storeSet:a=>globalThis.__lw_storeSet(a)," +
+            "storeSet:a=>globalThis.__lw_storeSet(typeof a==='string'?a:JSON.stringify(a))," +
             "logWrite:a=>globalThis.__lw_logWrite(a)," +
             "uuid:()=>globalThis.__lw_uuid(\"\")," +
-            "sleepMs:a=>globalThis.__lw_sleepMs(a)});" +
+            "sleepMs:a=>globalThis.__lw_sleepMs(typeof a==='string'?a:JSON.stringify(a))});" +
             "\"__bridge_ready__\";"
 
     private fun bindBridge(engine: QuickJs, handle: ProviderHandle) {

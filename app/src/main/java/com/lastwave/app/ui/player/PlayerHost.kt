@@ -263,6 +263,8 @@ class PlayerViewModel @Inject constructor(
     private val ytMusicLibraryManager: com.lastwave.app.data.ytmusic.YtMusicLibraryManager,
     private val likedSongsManager: com.lastwave.app.data.playlist.LikedSongsManager,
     private val scrobbleRepository: com.lastwave.app.data.repository.ScrobbleRepository,
+    private val downloadManager: com.lastwave.app.data.download.TrackDownloadManager,
+    private val routeNavigator: com.lastwave.app.ui.navigation.AppRouteNavigator,
 ) : ViewModel() {
     val navEvents = navigator.events
     val state = player.state
@@ -274,6 +276,13 @@ class PlayerViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, player.state.value.copy(positionMs = 0L, bufferedPositionMs = 0L))
     val settings: StateFlow<com.lastwave.app.data.local.MiscSettings> = settingsPreferences.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.lastwave.app.data.local.MiscSettings())
+    val activeDownloads = downloadManager.downloads
+        .map { map -> map.values.filter { !it.isFinished && it.error == null } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun navigateToDownloads() {
+        routeNavigator.navigateTo(com.lastwave.app.ui.navigation.Screen.Downloads.route)
+    }
     private val _customPlaylists = MutableStateFlow<List<SavedPlaylist>>(emptyList())
     val customPlaylists = _customPlaylists.asStateFlow()
     private var customPlaylistsLoaded = false
@@ -511,6 +520,7 @@ fun PlayerHost(
     content: @Composable () -> Unit,
 ) {
     val state by viewModel.chromeState.collectAsStateWithLifecycle()
+    val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
     var expanded by rememberSaveable { mutableStateOf(false) }
     var currentTab by rememberSaveable { mutableStateOf(FullPlayerTab.NOW_PLAYING) }
     var playlistTrack by remember { mutableStateOf<PlayableTrack?>(null) }
@@ -574,6 +584,14 @@ fun PlayerHost(
                     edgeToEdge = !hasBottomNavigation,
                     backdrop = null,
                     modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
+            if (activeDownloads.isNotEmpty() && !expanded) {
+                val latestProgress = activeDownloads.firstOrNull()?.progressPercent ?: 0
+                com.lastwave.app.ui.download.DraggableDownloadOverlay(
+                    activeDownloadsCount = activeDownloads.size,
+                    latestProgressPercent = latestProgress,
+                    onOpenDownloads = { viewModel.navigateToDownloads() },
                 )
             }
             AnimatedVisibility(
@@ -1669,6 +1687,9 @@ private fun FullPlayer(
                         .padding(horizontal = 20.dp)
                         .playerVerticalSwipe(enabled = currentTab != FullPlayerTab.NOW_PLAYING),
                 ) {
+                    // FullPlayer sits on a dark blurred-artwork scrim in both light and
+                    // dark mode, so foreground must use the white overlay palette —
+                    // never MaterialTheme onSurface (near-black in light mode).
                     IconButton(
                         onClick = {
                             if (currentTab != FullPlayerTab.NOW_PLAYING) {
@@ -1683,14 +1704,14 @@ private fun FullPlayer(
                             .clip(CircleShape)
                             .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
                             .background(
-                                liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
                             ),
                     ) {
                         Icon(
                             if (currentTab != FullPlayerTab.NOW_PLAYING) Icons.Filled.ArrowBack else Icons.Filled.ExpandMore,
                             if (currentTab != FullPlayerTab.NOW_PLAYING) "Back to player" else "Minimize player",
                             modifier = Modifier.size(26.dp),
-                            tint = MaterialTheme.colorScheme.onSurface,
+                            tint = Color.White.copy(alpha = 0.94f),
                         )
                     }
                     Column(
@@ -1704,7 +1725,7 @@ private fun FullPlayer(
                                 FullPlayerTab.QUEUE -> "PLAYING QUEUE"
                             },
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = Color.White.copy(alpha = 0.95f),
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 0.9.sp,
                         )
@@ -1715,7 +1736,7 @@ private fun FullPlayer(
                                 state.sourceLabel.takeIf { it.isNotBlank() } ?: "LastWave"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.92f),
+                            color = Color.White.copy(alpha = 0.70f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1728,14 +1749,14 @@ private fun FullPlayer(
                             .clip(CircleShape)
                             .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
                             .background(
-                                liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
                             ),
                     ) {
                         Icon(
                             Icons.Filled.MoreVert,
                             "Song options",
                             modifier = Modifier.size(22.dp),
-                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.90f),
+                            tint = Color.White.copy(alpha = 0.94f),
                         )
                     }
                 }
@@ -2091,7 +2112,7 @@ private fun FullPlayer(
                                                     letterSpacing = (-0.35).sp,
                                                     fontWeight = FontWeight.ExtraBold,
                                                 ),
-                                                color = MaterialTheme.colorScheme.onSurface,
+                                                color = Color.White,
                                                 maxLines = 1,
                                                 modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
                                             )
@@ -2110,7 +2131,7 @@ private fun FullPlayer(
                                                             fontSize = 17.sp,
                                                             fontWeight = FontWeight.Medium,
                                                         ),
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.94f),
+                                                        color = Color.White.copy(alpha = 0.72f),
                                                         modifier = Modifier
                                                             .clickable(
                                                                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
@@ -2124,7 +2145,7 @@ private fun FullPlayer(
                                                                 fontSize = 17.sp,
                                                                 fontWeight = FontWeight.Normal,
                                                             ),
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.60f),
+                                                            color = Color.White.copy(alpha = 0.50f),
                                                         )
                                                     }
                                                 }
@@ -2150,14 +2171,14 @@ private fun FullPlayer(
                                                 interactionSource = likeInteraction,
                                                 shape = CircleShape,
                                                 color = liquidGlassContainerColor(if (isLiked) {
-                                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                                                    Color.White.copy(alpha = 0.92f)
                                                 } else {
-                                                    MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)
+                                                    Color.White.copy(alpha = 0.14f)
                                                 }),
                                                 contentColor = if (isLiked) {
-                                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                                    Color(0xFFE91E63)
                                                 } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                    Color.White.copy(alpha = 0.85f)
                                                 },
                                                 tonalElevation = 0.dp,
                                                 shadowElevation = 0.dp,
@@ -2188,8 +2209,8 @@ private fun FullPlayer(
                                                 onClick = { onTabChange(FullPlayerTab.LYRICS) },
                                                 interactionSource = lyricsInteraction,
                                                 shape = CircleShape,
-                                                color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
-                                                contentColor = MaterialTheme.colorScheme.primary,
+                                                color = liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                                                contentColor = Color.White.copy(alpha = 0.90f),
                                                 tonalElevation = 0.dp,
                                                 shadowElevation = 0.dp,
                                                 modifier = Modifier
@@ -2216,13 +2237,16 @@ private fun FullPlayer(
                                         trackKey = track.videoId ?: "${track.artist}|${track.title}",
                                         wavyEnabled = wavySeekbarEnabled,
                                         onSeek = player::seekTo,
-                                        isTranslucent = false,
+                                        // Background is always a dark scrim: use the white
+                                        // overlay palette so time labels + waves stay
+                                        // readable in light mode too.
+                                        isTranslucent = true,
                                     )
                                     Spacer(Modifier.height(14.dp))
-                                    MainControls(state, player, isTranslucent = false)
+                                    MainControls(state, player, isTranslucent = true)
                                     }
                                     Spacer(Modifier.height(24.dp))
-                                    PlayerUtilityControls(state, player, isTranslucent = false)
+                                    PlayerUtilityControls(state, player, isTranslucent = true)
                                 }
                         }
                     }
@@ -2810,7 +2834,12 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Up next", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Up next",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                )
                 Text(
                     if (state.isEndlessQueue) {
                         "Unlimited songs · ${state.currentIndex.coerceAtLeast(0) + 1} playing"
@@ -2818,13 +2847,13 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                         "${state.queue.size} songs · ${state.currentIndex.coerceAtLeast(0) + 1} playing"
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color.White.copy(alpha = 0.70f),
                 )
                 if (state.queue.size > 1) {
                     Text(
                         stringResource(com.lastwave.app.R.string.queue_rearrange_hint),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        color = Color.White.copy(alpha = 0.55f),
                     )
                 }
             }
@@ -2836,9 +2865,13 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                    .background(Color.White.copy(alpha = 0.14f)),
             ) {
-                Icon(Icons.Filled.Visibility, "Scroll to current song")
+                Icon(
+                    Icons.Filled.Visibility,
+                    "Scroll to current song",
+                    tint = Color.White.copy(alpha = 0.90f),
+                )
             }
 
         }

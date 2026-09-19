@@ -175,7 +175,6 @@ data class PlaybackProgressState(
 class MusicPlayer @Inject constructor(
     @ApplicationContext context: Context,
     private val innerTube: InnerTubeMusicApi,
-    private val losslessMusicApi: LosslessMusicApi,
     private val moduleResolver: ModulePlaybackResolver,
     private val moduleDrmFactory: ModuleDrmFactory,
     private val moduleManager: com.lastwave.app.data.plugin.ModuleManager,
@@ -3098,7 +3097,7 @@ class MusicPlayer @Inject constructor(
         }
 
         val misc = runCatching { settingsPreferences.settings.first() }.getOrDefault(MiscSettings())
-        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.preferLosslessStreaming, excludedLosslessUrls, allowLocalDownloads)
+        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.dolbyAtmosEnabled, misc.preferLosslessStreaming, excludedLosslessUrls, allowLocalDownloads)
         val now = SystemClock.elapsedRealtime()
         resolutionRequests.entries.removeIf { now - it.value.first > 60_000L }
         if (resolutionRequests.size >= 64) {
@@ -3137,22 +3136,17 @@ class MusicPlayer @Inject constructor(
         val youtubeDeferred = applicationScope.async(Dispatchers.IO) {
             runCatching { resolveYoutubeTrackAudioStream(track, videoId) }.getOrNull()
         }
-        // Provider modules queried in parallel with backend; priority is Backend -> Module -> YouTube
+        // Provider module (.lwp engine) resolution
         val moduleDeferred = applicationScope.async(Dispatchers.IO) {
-            if (!misc.preferProviderModules) null
-            else runCatching { resolveModuleTrackAudioStream(track, misc) }.getOrNull()
+            if (!allowLossless || !misc.preferLosslessStreaming) null
+            else runCatching { resolveModuleTrackAudioStream(track, misc, excludedLosslessUrls) }.getOrNull()
         }
         return try {
-            val backendStream = if (allowLossless) {
-                withTimeoutOrNull(5_000L) {
-                    resolveLosslessTrackAudioStream(track, misc, excludedLosslessUrls)
-                }
+            val moduleStream = if (allowLossless && misc.preferLosslessStreaming) {
+                withTimeoutOrNull(MODULE_RESOLVE_TIMEOUT_MS) { moduleDeferred.await() }
             } else null
 
-            backendStream
-                ?: runCatching {
-                    withTimeoutOrNull(MODULE_RESOLVE_TIMEOUT_MS) { moduleDeferred.await() }
-                }.getOrNull()
+            moduleStream
                 ?: youtubeDeferred.await()
                 ?: runCatching { resolveYoutubeTrackAudioStream(track, videoId) }.getOrNull()
                 ?: resolveYoutubeTrackAudioStream(track, null)
@@ -3165,12 +3159,16 @@ class MusicPlayer @Inject constructor(
     private suspend fun resolveModuleTrackAudioStream(
         track: PlayableTrack,
         misc: MiscSettings,
+        excludedLosslessUrls: Set<String> = emptySet(),
     ): ResolvedStream? {
-        val descriptor = moduleResolver.resolve(track.title, track.artist, misc.losslessQuality)
+        val effectiveQuality = if (misc.dolbyAtmosEnabled) 28 else misc.losslessQuality
+        val descriptor = moduleResolver.resolve(track.title, track.artist, effectiveQuality)
             ?: return null
         val s = descriptor.stream
+        if (s.baseUrl.isNotBlank() && s.baseUrl in excludedLosslessUrls) return null
+
         // Progressive clear module streams play directly like backend URLs.
-        if (s.type == "progressive" || (s.baseUrl.isNotBlank() && s.segments.isEmpty())) {
+        if ((s.type == "progressive" || (s.baseUrl.isNotBlank() && s.segments.isEmpty())) && !s.baseUrl.startsWith("data:application/dash+xml") && s.type != "dash_xml") {
             val lossless = !s.codec.equals("opus", ignoreCase = true) &&
                 !s.codec.equals("mp3", ignoreCase = true) &&
                 !s.codec.equals("aac", ignoreCase = true)
@@ -3181,7 +3179,7 @@ class MusicPlayer @Inject constructor(
                 audioCodec = if (lossless) {
                     if ((s.bitDepth) > 16 || (s.sampleRate) > 48000) "HI-RES FLAC" else "LOSSLESS"
                 } else s.codec.uppercase(),
-                cacheKey = "modprog:${descriptor.trackId}:${s.quality}",
+                cacheKey = "lossless:${track.mediaIdKey()}:${descriptor.stream.quality}",
                 requestHeaders = descriptor.headers,
                 isLossless = lossless,
                 bitDepth = s.bitDepth.takeIf { it > 0 },
@@ -3204,48 +3202,6 @@ class MusicPlayer @Inject constructor(
             bitDepth = s.bitDepth.takeIf { it > 0 },
             samplingRateKHz = s.sampleRate.takeIf { it > 0 }?.div(1000.0),
             segmentedDrm = descriptor,
-        )
-    }
-
-    private suspend fun resolveLosslessTrackAudioStream(
-        track: PlayableTrack,
-        misc: MiscSettings,
-        excludedUrls: Set<String>,
-    ): ResolvedStream? {
-        val losslessStream = try {
-            losslessMusicApi.resolveStream(
-                title = track.title,
-                artist = track.artist,
-                expectedAlbum = track.album,
-                preferredQuality = misc.losslessQuality,
-                excludedUrls = excludedUrls,
-            )
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            return null
-        } ?: return null
-        val codec = when {
-            losslessStream.bitDepth > 16 || losslessStream.samplingRate > 48.0 -> "HI-RES FLAC"
-            losslessStream.formatId == LosslessMusicApi.QUALITY_CD_LOSSLESS -> "LOSSLESS"
-            losslessStream.formatId == LosslessMusicApi.QUALITY_MP3_320 -> "MP3 320k"
-            else -> "LOSSLESS"
-        }
-        // One stable CacheDataSource key per track + quality (no per-URL hash).
-        // Provider FLAC URLs are signed and rotate; keying by URL fragments the
-        // disk cache so backward/forward seeks can never hit locally cached
-        // ranges. Playback reads (via ResolvingDataSource customCacheKey) and
-        // the progressive current-stream cacher below share this key, so
-        // cached ranges are served locally across seeks and URL refreshes.
-        return ResolvedStream(
-            url = losslessStream.url,
-            mimeType = losslessStream.mimeType,
-            bitrateKbps = losslessStream.bitrateKbps,
-            audioCodec = codec,
-            cacheKey = "lossless:${track.mediaIdKey()}:${losslessStream.formatId}",
-            isLossless = true,
-            bitDepth = losslessStream.bitDepth.takeIf { it > 0 },
-            samplingRateKHz = losslessStream.samplingRate.takeIf { it > 0 },
         )
     }
 
@@ -3737,7 +3693,7 @@ class MusicPlayer @Inject constructor(
         const val MAX_PREPARED_STREAMS = 256
         const val RESOLVED_URL_EXPIRY_MARGIN_MS = 2 * 60 * 1000L
         /** Module lookups must never stall the YouTube fallback behind them. */
-        const val MODULE_RESOLVE_TIMEOUT_MS = 25_000L
+        const val MODULE_RESOLVE_TIMEOUT_MS = 6_000L
         /** Offline license renewal attempt before giving up to streaming. */
         const val OFFLINE_LICENSE_RENEW_TIMEOUT_MS = 8_000L
         val PERMANENT_PLAYBACK_ERROR_CODES = setOf(
